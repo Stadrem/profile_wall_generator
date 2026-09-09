@@ -8,3 +8,6 @@ __pycache__/
 
 # Archives / build leftovers
 *.zip
+
+# Internal planning/design notes (kept locally, not published)
+docs/
