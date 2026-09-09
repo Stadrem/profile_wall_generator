@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Blender
+*.blend1
+*.blend2
+
+# Archives / build leftovers
+*.zip
