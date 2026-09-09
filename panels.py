@@ -17,6 +17,12 @@ def _source_path_kinds(source_obj):
                 degrees[vertex_index] = degrees.get(vertex_index, 0) + 1
         closed = bool(degrees) and all(degree == 2 for degree in degrees.values())
         return closed, not closed
+    # Sources without usable edges (loose vertices, empty meshes) still reach
+    # the panel. Report "no paths" instead of returning None, which the callers
+    # would unpack and raise on during draw().
+    return False, False
+
+
 def _has_bezier_splines(source_obj):
     """Return whether the selected source contains any Bezier splines."""
     if source_obj is not None and source_obj.type == "CURVE":

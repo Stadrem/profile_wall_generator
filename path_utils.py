@@ -9,7 +9,10 @@ def _xy_distance(a, b):
     return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5
 
 
-def remove_near_duplicates(points, merge_distance):
+MIN_XY_EXTENT = 1e-6
+
+
+def remove_near_duplicates(points, merge_distance, closed=False):
     if not points:
         return []
 
@@ -18,9 +21,31 @@ def remove_near_duplicates(points, merge_distance):
         if (point - cleaned[-1]).length > merge_distance:
             cleaned.append(point)
 
-    if len(cleaned) > 2 and (cleaned[0] - cleaned[-1]).length <= merge_distance:
+    # Only a cyclic path wraps back onto its first point, so only there is a
+    # coincident last point a duplicate. Dropping it on an open path would
+    # silently delete a real end point the user placed.
+    if closed and len(cleaned) > 2 and (cleaned[0] - cleaned[-1]).length <= merge_distance:
         cleaned.pop()
     return cleaned
+
+
+def _finalize_path(points, closed, merge_distance):
+    """Clean a raw point list and reject paths the wall builder cannot use."""
+    points = remove_near_duplicates(points, merge_distance, closed=closed)
+    if len(points) < 2:
+        raise PathError("Path needs at least two points.")
+
+    # The wall is extruded along XY-plane normals, so a path without horizontal
+    # extent (a purely vertical line) collapses into zero-area faces instead of
+    # a wall. Reject it here rather than emitting degenerate geometry.
+    extent_x = max(point.x for point in points) - min(point.x for point in points)
+    extent_y = max(point.y for point in points) - min(point.y for point in points)
+    if (extent_x ** 2 + extent_y ** 2) ** 0.5 <= max(merge_distance, MIN_XY_EXTENT):
+        raise PathError(
+            "Path has no horizontal extent. A profile wall is extruded in the "
+            "XY plane, so a vertical path cannot be used."
+        )
+    return points, closed
 
 
 def extract_path(obj, merge_distance=0.001):
@@ -94,10 +119,7 @@ def _extract_curve_spline_path(obj, spline, merge_distance, resolution_mode="CUS
     else:
         raise PathError("Only Poly and Bezier curves are supported.")
 
-    points = remove_near_duplicates(points, merge_distance)
-    if len(points) < 2:
-        raise PathError("Path needs at least two points.")
-    return points, closed
+    return _finalize_path(points, closed, merge_distance)
 
 
 def _sample_bezier_spline(obj, spline, samples_per_segment=8):
@@ -183,10 +205,7 @@ def extract_mesh_path(obj, merge_distance=0.001):
         raise PathError("Mesh path must be one connected open chain or closed loop.")
 
     points = [obj.matrix_world @ mesh.vertices[index].co for index in ordered_indices]
-    points = remove_near_duplicates(points, merge_distance)
-    if len(points) < 2:
-        raise PathError("Path needs at least two points.")
-    return points, closed
+    return _finalize_path(points, closed, merge_distance)
 
 
 def signed_area_xy(points):

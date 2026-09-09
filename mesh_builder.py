@@ -500,6 +500,7 @@ def _create_wall_object(
     mesh = bpy.data.meshes.new(source_obj.name + "_ProfileWallMesh")
     mesh.from_pydata(vertices, [], faces)
     mesh.update(calc_edges=True)
+    _warn_on_dropped_faces(mesh, len(faces), source_obj.name, "from_pydata")
 
     if existing_obj is not None:
         old_mesh = existing_obj.data
@@ -517,6 +518,7 @@ def _create_wall_object(
 
     uv_utils.assign_basic_uv(mesh, face_uvs, props.uv_scale_u, props.uv_scale_v)
     mesh.validate(clean_customdata=False)
+    _warn_on_dropped_faces(mesh, len(faces), source_obj.name, "mesh.validate")
     mesh.update()
     return obj, face_material_keys
 
@@ -799,6 +801,18 @@ def _split_cap_boundary_faces(faces, uvs, splits):
 
 
 def apply_face_material_indices(obj, material_indices, face_material_keys):
+    # The keys are positional: entry N describes polygon N. If Blender rejected
+    # any face while building the mesh the two lists no longer line up, and a
+    # silent zip() would paint every face after the gap with the wrong
+    # material. Report it instead of shifting the whole assignment.
+    polygon_count = len(obj.data.polygons)
+    if polygon_count != len(face_material_keys):
+        print(
+            "Profile Wall Generator: face count mismatch on "
+            f"'{obj.name}' ({polygon_count} faces, {len(face_material_keys)} "
+            "material keys). Materials may be misassigned; check the source "
+            "path for self-intersections or duplicate points."
+        )
     for polygon, key in zip(obj.data.polygons, face_material_keys):
         polygon.material_index = material_indices.get(key, 0)
 
@@ -948,6 +962,27 @@ def apply_smooth_shading(obj, props):
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+def _warn_on_dropped_faces(mesh, expected_count, source_name, stage):
+    """Report faces Blender refused, which desynchronises the per-face lists.
+
+    ``face_uvs`` and ``face_material_keys`` are matched to faces by position,
+    so a dropped face silently shifts every UV and material after it. Nothing
+    here can recover the mapping, but a visible message beats a wall whose
+    trim and body materials are scrambled for no apparent reason.
+    """
+    actual_count = len(mesh.polygons)
+    if actual_count == expected_count:
+        return True
+    print(
+        f"Profile Wall Generator: {stage} dropped "
+        f"{expected_count - actual_count} of {expected_count} faces while "
+        f"building the wall for '{source_name}'. UVs and materials may be "
+        "misaligned; check the source path for self-intersections, duplicate "
+        "points or zero-length segments."
+    )
+    return False
+
 
 def _compute_profile_v_coords(profile, height_scale, offset_scale, use_profile_offset=True):
     """Compute arc-length V coordinates along the vertical profile."""
