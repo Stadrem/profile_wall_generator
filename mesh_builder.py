@@ -497,10 +497,27 @@ def _create_wall_object(
             for co in vertices
         ]
 
+    # Build the replacement mesh completely, and prove it survived Blender's
+    # own checks, before anything touches the existing wall. ``face_uvs`` and
+    # ``face_material_keys`` are matched to faces by position, so a single
+    # rejected face shifts every UV and material after it, and no later step
+    # can recover the mapping. An aborted rebuild must therefore leave the
+    # previous wall exactly as it was rather than replace it with a scrambled
+    # one.
     mesh = bpy.data.meshes.new(source_obj.name + "_ProfileWallMesh")
-    mesh.from_pydata(vertices, [], faces)
-    mesh.update(calc_edges=True)
-    _warn_on_dropped_faces(mesh, len(faces), source_obj.name, "from_pydata")
+    try:
+        mesh.from_pydata(vertices, [], faces)
+        mesh.update(calc_edges=True)
+        _require_all_faces(mesh, len(faces), "from_pydata")
+        mesh.validate(clean_customdata=False)
+        _require_all_faces(mesh, len(faces), "mesh.validate")
+        uv_utils.assign_basic_uv(mesh, face_uvs, props.uv_scale_u, props.uv_scale_v)
+        mesh.update()
+    except Exception:
+        # Discard the rejected mesh so a cancelled rebuild leaves no orphan
+        # datablock behind in the .blend file.
+        bpy.data.meshes.remove(mesh)
+        raise
 
     if existing_obj is not None:
         old_mesh = existing_obj.data
@@ -516,10 +533,6 @@ def _create_wall_object(
     # until operators convert them into material indices.
     obj["_profile_wall_face_material_keys"] = ",".join(face_material_keys)
 
-    uv_utils.assign_basic_uv(mesh, face_uvs, props.uv_scale_u, props.uv_scale_v)
-    mesh.validate(clean_customdata=False)
-    _warn_on_dropped_faces(mesh, len(faces), source_obj.name, "mesh.validate")
-    mesh.update()
     return obj, face_material_keys
 
 
@@ -801,17 +814,16 @@ def _split_cap_boundary_faces(faces, uvs, splits):
 
 
 def apply_face_material_indices(obj, material_indices, face_material_keys):
-    # The keys are positional: entry N describes polygon N. If Blender rejected
-    # any face while building the mesh the two lists no longer line up, and a
-    # silent zip() would paint every face after the gap with the wrong
-    # material. Report it instead of shifting the whole assignment.
+    # The keys are positional: entry N describes polygon N. _create_wall_object
+    # refuses to publish a mesh whose face count changed, so reaching this with
+    # mismatched lengths means a caller built the object some other way. Report
+    # it rather than letting zip() paint every face after the gap wrong.
     polygon_count = len(obj.data.polygons)
     if polygon_count != len(face_material_keys):
         print(
             "Profile Wall Generator: face count mismatch on "
             f"'{obj.name}' ({polygon_count} faces, {len(face_material_keys)} "
-            "material keys). Materials may be misassigned; check the source "
-            "path for self-intersections or duplicate points."
+            "material keys). Materials will be misassigned."
         )
     for polygon, key in zip(obj.data.polygons, face_material_keys):
         polygon.material_index = material_indices.get(key, 0)
@@ -963,25 +975,24 @@ def apply_smooth_shading(obj, props):
 # Private helpers
 # ---------------------------------------------------------------------------
 
-def _warn_on_dropped_faces(mesh, expected_count, source_name, stage):
-    """Report faces Blender refused, which desynchronises the per-face lists.
+def _require_all_faces(mesh, expected_count, stage):
+    """Abort the build if Blender refused any of the generated faces.
 
-    ``face_uvs`` and ``face_material_keys`` are matched to faces by position,
-    so a dropped face silently shifts every UV and material after it. Nothing
-    here can recover the mapping, but a visible message beats a wall whose
-    trim and body materials are scrambled for no apparent reason.
+    The per-face lists are positional, so a dropped face cannot be detected
+    later and cannot be mapped back. Raising here keeps the caller's existing
+    wall intact instead of replacing it with one whose UVs and materials are
+    silently shifted.
     """
     actual_count = len(mesh.polygons)
     if actual_count == expected_count:
-        return True
-    print(
-        f"Profile Wall Generator: {stage} dropped "
-        f"{expected_count - actual_count} of {expected_count} faces while "
-        f"building the wall for '{source_name}'. UVs and materials may be "
-        "misaligned; check the source path for self-intersections, duplicate "
-        "points or zero-length segments."
+        return
+    raise path_utils.PathError(
+        f"Blender rejected {expected_count - actual_count} of "
+        f"{expected_count} generated faces ({stage}). The wall was left "
+        "unchanged to avoid misaligned UVs and materials. Check the source "
+        "path for self-intersections, duplicate points or zero-length "
+        "segments."
     )
-    return False
 
 
 def _compute_profile_v_coords(profile, height_scale, offset_scale, use_profile_offset=True):

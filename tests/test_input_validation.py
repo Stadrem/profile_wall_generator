@@ -2,9 +2,10 @@
 
 Regression cover for source-input handling:
   * panel state for a source that holds no usable path
-  * rejection of paths without horizontal extent
+  * rejection of paths without horizontal extent, whole or per segment
   * end-point preservation on open paths
-  * detection of faces dropped while building the mesh
+  * refusal to publish a mesh whose faces Blender rejected, leaving any
+    existing wall untouched
 """
 import sys
 from pathlib import Path
@@ -93,11 +94,46 @@ try:
         lambda: path_utils.extract_paths(vertical_mesh, 0.001),
     )
 
+    # A vertical run inside an otherwise horizontal path is equally unusable:
+    # compute_normals has no direction there and emits inverted, zero-area
+    # faces. The whole-path extent check alone does not see it.
+    mid_vertical = make_poly_curve(
+        "MidVertical", [(0, 0, 0), (4, 0, 0), (4, 0, 3), (8, 0, 3)], False
+    )
+    expect_path_error(
+        "Segment 2 is vertical",
+        lambda: path_utils.extract_paths(mid_vertical, 0.001),
+    )
+
+    lead_vertical = make_poly_curve(
+        "LeadVertical", [(0, 0, 0), (0, 0, 2), (4, 0, 2)], False
+    )
+    expect_path_error(
+        "Segment 1 is vertical",
+        lambda: path_utils.extract_paths(lead_vertical, 0.001),
+    )
+
+    # A closed path must have its wrap-around segment checked too.
+    closed_vertical = make_poly_curve(
+        "ClosedVertical", [(0, 0, 0), (4, 0, 0), (4, 4, 0), (0, 0, 2)], True
+    )
+    expect_path_error(
+        "Segment 4 is vertical",
+        lambda: path_utils.extract_paths(closed_vertical, 0.001),
+    )
+
     # A spline that only tilts out of plane stays valid.
     sloped = make_poly_curve("Sloped", [(0, 0, 0), (4, 0, 1), (8, 0, 2)], False)
     points, closed = path_utils.extract_paths(sloped, 0.001)[0]
     assert len(points) == 3 and not closed
-    print("PASS vertical paths rejected, sloped paths accepted")
+
+    # A small but real horizontal step must not be mistaken for a vertical one.
+    small_step = make_poly_curve(
+        "SmallStep", [(0, 0, 0), (4, 0, 0), (4.0005, 0, 1), (8, 0, 1)], False
+    )
+    points, _closed = path_utils.extract_paths(small_step, 0.001)[0]
+    assert len(points) == 4, len(points)
+    print("PASS vertical paths and vertical segments rejected")
 
     # --- Open paths keep both end points -----------------------------------
     ring_coords = [(0, 0, 0), (4, 0, 0), (4, 4, 0), (0, 0, 0)]
@@ -121,7 +157,7 @@ try:
     assert len(points) == 3, len(points)
     print("PASS open path end points preserved")
 
-    # --- Dropped faces are detected ----------------------------------------
+    # --- A mesh with rejected faces is never published ----------------------
     source = make_poly_curve(
         "Wall", [(0, 0, 0), (6, 0, 0), (6, 4, 0), (0, 4, 0)], True
     )
@@ -132,13 +168,49 @@ try:
         bpy.context, source, paths, props
     )
     assert len(keys) == len(wall.data.polygons), (len(keys), len(wall.data.polygons))
-    assert mesh_builder._warn_on_dropped_faces(
-        wall.data, len(wall.data.polygons), source.name, "test"
+
+    good_mesh = wall.data
+    good_faces = len(good_mesh.polygons)
+    good_name = good_mesh.name
+
+    # The second face repeats a vertex, so mesh.validate() removes it. Anything
+    # built from this geometry would carry UVs and materials shifted by one
+    # face from that point on.
+    bad_geometry = (
+        [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)],
+        [(0, 1, 2, 3), (0, 1, 1, 2)],
+        [[(0, 0), (1, 0), (1, 1), (0, 1)], [(0, 0), (1, 0), (1, 1), (0, 1)]],
+        ["body", "trim"],
     )
-    assert not mesh_builder._warn_on_dropped_faces(
-        wall.data, len(wall.data.polygons) + 1, source.name, "test"
+
+    mesh_count_before = len(bpy.data.meshes)
+    expect_path_error(
+        "Blender rejected",
+        lambda: mesh_builder._create_wall_object(
+            bpy.context, source, bad_geometry, props, existing_obj=wall
+        ),
     )
-    print("PASS dropped-face detection")
+
+    # The existing wall must survive the cancelled rebuild untouched...
+    assert wall.data is good_mesh, "existing wall mesh was replaced"
+    assert wall.data.name == good_name
+    assert len(wall.data.polygons) == good_faces, len(wall.data.polygons)
+    # ...and the rejected mesh must not be left behind in the file.
+    assert len(bpy.data.meshes) == mesh_count_before, (
+        "orphan mesh datablock leaked", mesh_count_before, len(bpy.data.meshes)
+    )
+
+    # The same guard applies to a first-time generation, which must not link a
+    # half-built object into the scene.
+    object_count_before = len(bpy.data.objects)
+    expect_path_error(
+        "Blender rejected",
+        lambda: mesh_builder._create_wall_object(
+            bpy.context, source, bad_geometry, props
+        ),
+    )
+    assert len(bpy.data.objects) == object_count_before
+    print("PASS rejected mesh is never published")
 
     print("ALL_INPUT_VALIDATION_TESTS_PASSED")
 finally:

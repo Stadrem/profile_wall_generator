@@ -45,6 +45,22 @@ def _finalize_path(points, closed, merge_distance):
             "Path has no horizontal extent. A profile wall is extruded in the "
             "XY plane, so a vertical path cannot be used."
         )
+
+    # A single vertical segment inside an otherwise horizontal path is just as
+    # unusable: ``compute_normals`` has no direction to work from and falls
+    # back to an arbitrary normal, which produces zero-area and inverted faces
+    # around that segment. Points are merged by 3D distance, so a pair sharing
+    # an XY position but separated in Z survives that earlier cleanup.
+    segment_count = len(points) if closed else len(points) - 1
+    for index in range(segment_count):
+        a = points[index]
+        b = points[(index + 1) % len(points)]
+        if _xy_distance(a, b) <= MIN_XY_EXTENT:
+            raise PathError(
+                f"Segment {index + 1} is vertical (no horizontal length). A "
+                "profile wall is extruded in the XY plane, so every segment "
+                "must move horizontally."
+            )
     return points, closed
 
 
